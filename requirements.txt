@@ -1,0 +1,8 @@
+Flask==3.0.2
+opencv-python==4.9.0.80
+ultralytics==8.1.28
+SQLAlchemy==2.0.28
+Werkzeug==3.0.1
+flask-login==0.6.3
+python-dotenv==1.0.1
+bcrypt==4.1.2 

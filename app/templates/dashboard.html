@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+<style>
+    .video-container {
+        position: relative;
+        width: 100%;
+        padding-top: 56.25%; /* 16:9 Aspect Ratio */
+    }
+    .video-container img {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-gray-900">ETPC Detection Dashboard</h1>
+        <p class="mt-2 text-gray-600">Welcome, {{ current_user.username }}</p>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <!-- Left Column - Video Feeds -->
+        <div class="space-y-8">
+            <!-- Live Camera Feed -->
+            <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                <div class="p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-4">Track Monitoring Feed</h2>
+                    <div class="video-container">
+                        <img id="camera-feed" src="{{ url_for('video_feed', type='camera') }}" 
+                             class="rounded-lg" alt="Camera Feed"
+                             onerror="handleVideoError(this, 'camera-error')">
+                        <div id="camera-error" class="hidden absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75 rounded-lg">
+                            <p class="text-white text-center">Camera feed unavailable.<br>Please check your connection.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detection Feed -->
+            <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                <div class="p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-4">ETPC Detection Feed</h2>
+                    <div class="video-container">
+                        <img id="detection-feed" src="{{ url_for('video_feed', type='detection') }}" 
+                             class="rounded-lg" alt="Detection Feed"
+                             onerror="handleVideoError(this, 'detection-error')">
+                        <div id="detection-error" class="hidden absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75 rounded-lg">
+                            <p class="text-white text-center">Detection feed unavailable.<br>Please check your connection.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column - Controls and Stats -->
+        <div class="space-y-8">
+            <!-- Detection Controls -->
+            <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                <div class="p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-4">Detection Controls</h2>
+                    <div class="space-y-6">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Confidence Threshold</label>
+                            <input type="range" min="0" max="1" step="0.05" value="0.3" 
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                   id="confidence-slider">
+                            <div class="flex justify-between text-sm text-gray-600 mt-1">
+                                <span>0%</span>
+                                <span id="confidence-value">30%</span>
+                                <span>100%</span>
+                            </div>
+                        </div>
+                        <button id="toggle-detection" 
+                                class="w-full bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-md">
+                            Disable Detection
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Detections -->
+            <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                <div class="p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-4">Recent Proximity Alerts</h2>
+                    <div id="recent-detections" class="space-y-2">
+                        <!-- Detections will be populated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Handle video feed errors
+    function handleVideoError(img, errorId) {
+        document.getElementById(errorId).classList.remove('hidden');
+        setTimeout(() => {
+            img.src = img.src; // Retry loading
+        }, 5000);
+    }
+
+    // Update confidence threshold
+    const confidenceSlider = document.getElementById('confidence-slider');
+    const confidenceValue = document.getElementById('confidence-value');
+    
+    confidenceSlider.addEventListener('input', (e) => {
+        const value = e.target.value;
+        confidenceValue.textContent = `${parseFloat(value * 100).toFixed(0)}%`;
+        
+        fetch('/update_threshold', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ threshold: value })
+        });
+    });
+
+    // Toggle detection
+    const toggleBtn = document.getElementById('toggle-detection');
+    let detectionEnabled = true;
+    
+    toggleBtn.addEventListener('click', () => {
+        fetch('/toggle_detection', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            detectionEnabled = data.detection_enabled;
+            toggleBtn.textContent = detectionEnabled ? 'Disable Detection' : 'Enable Detection';
+            toggleBtn.classList.toggle('bg-blue-500');
+            toggleBtn.classList.toggle('bg-gray-500');
+        });
+    });
+
+    // Function to update recent detections
+    function updateRecentDetections() {
+        fetch('/get_recent_detections')
+            .then(response => response.json())
+            .then(data => {
+                const detectionsDiv = document.getElementById('recent-detections');
+                if (!detectionsDiv) return;
+                
+                detectionsDiv.innerHTML = ''; // Clear existing detections
+                
+                if (data.success && data.detections) {
+                    data.detections.forEach(detection => {
+                        const detectionEl = document.createElement('div');
+                        detectionEl.className = 'bg-gray-50 p-3 rounded-md';
+                        detectionEl.innerHTML = `
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <span class="font-medium">${detection.object_name}</span>
+                                    <span class="text-sm text-gray-600 ml-2">${detection.confidence}</span>
+                                </div>
+                                <span class="text-xs text-gray-500">${detection.timestamp}</span>
+                            </div>
+                        `;
+                        detectionsDiv.appendChild(detectionEl);
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching detections:', error);
+                logger.error(`Error fetching detections: ${error}`);
+            });
+    }
+
+    // Update detections every 2 seconds
+    setInterval(updateRecentDetections, 2000);
+
+    // Initial update
+    updateRecentDetections();
+</script>
+{% endblock %}
+
+
