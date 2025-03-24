@@ -11,7 +11,6 @@ from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 import os
 import sys
-import paho.mqtt.client as mqtt
 import json
 
 # Add the project root directory to Python path
@@ -107,42 +106,42 @@ except Exception as e:
     model = None
 
 # MQTT Configuration
-MQTT_BROKER = "broker.hivemq.com"  # You can use your own broker
-MQTT_PORT = 1883
-MQTT_TOPIC_BUZZER = "road_safety/buzzer"
-MQTT_TOPIC_LED = "road_safety/led"
+# MQTT_BROKER = "broker.hivemq.com"  # You can use your own broker
+# MQTT_PORT = 1883
+# MQTT_TOPIC_BUZZER = "road_safety/buzzer"
+# MQTT_TOPIC_LED = "road_safety/led"
 
 # Initialize MQTT client
-mqtt_client = mqtt.Client()
+# mqtt_client = mqtt.Client()
 
-def setup_mqtt():
-    """Initialize MQTT connection"""
-    try:
-        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        mqtt_client.loop_start()
-        logger.info("MQTT client connected successfully")
-    except Exception as e:
-        logger.error(f"MQTT connection failed: {str(e)}")
+# def setup_mqtt():
+#     """Initialize MQTT connection"""
+#     try:
+#         mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+#         mqtt_client.loop_start()
+#         logger.info("MQTT client connected successfully")
+#     except Exception as e:
+#         logger.error(f"MQTT connection failed: {str(e)}")
 
-def control_buzzer(state):
-    """Control buzzer via MQTT"""
-    try:
-        mqtt_client.publish("road_safety/buzzer", 
-                          json.dumps({"state": state}),
-                          qos=1)  # Added QoS level 1
-        print(f"MQTT: Sent buzzer state: {state}")
-    except Exception as e:
-        print(f"MQTT Error (buzzer): {str(e)}")
+# def control_buzzer(state):
+#     """Control buzzer via MQTT"""
+#     try:
+#         mqtt_client.publish("road_safety/buzzer", 
+#                           json.dumps({"state": state}),
+#                           qos=1)
+#         print(f"MQTT: Sent buzzer state: {state}")
+#     except Exception as e:
+#         print(f"MQTT Error (buzzer): {str(e)}")
 
-def control_led(color, state):
-    """Control LED via MQTT"""
-    try:
-        mqtt_client.publish("road_safety/led",
-                          json.dumps({"led": color, "state": state}),
-                          qos=1)  # Added QoS level 1
-        print(f"MQTT: Sent LED state: {color}={state}")
-    except Exception as e:
-        print(f"MQTT Error (LED): {str(e)}")
+# def control_led(color, state):
+#     """Control LED via MQTT"""
+#     try:
+#         mqtt_client.publish("road_safety/led",
+#                           json.dumps({"led": color, "state": state}),
+#                           qos=1)
+#         print(f"MQTT: Sent LED state: {color}={state}")
+#     except Exception as e:
+#         print(f"MQTT Error (LED): {str(e)}")
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -465,14 +464,8 @@ def detection_worker():
                         
                         if obj_name in dangerous_objects and confidence > 0.6:
                             print(f"Dangerous object detected: {obj_name}")  # Debug print
-                            control_buzzer(True)
-                            control_led("red", True)
-                            control_led("green", False)
                             time.sleep(2)  # Alert duration
-                            control_buzzer(False)
-                            control_led("red", False)
-                            control_led("green", True)
-                
+
                 # Slight delay to prevent maxing out CPU
                 time.sleep(1/camera_fps)  # Aim for target FPS
                 
@@ -1093,6 +1086,50 @@ def get_recent_detections():
             'error': str(e)
         }), 500
 
+@app.route('/api/latest_detections', methods=['GET'])
+def get_latest_detections():
+    """API endpoint for getting latest detections for ESP32"""
+    try:
+        with SessionFactory() as session:
+            # Get the most recent detections
+            latest_detections = session.query(Detection)\
+                .order_by(Detection.timestamp.desc())\
+                .limit(5).all()
+            
+            # Define dangerous objects
+            dangerous_objects = ["person", "car", "motorcycle", "truck", "bus"]
+            
+            # Process detections
+            dangerous_detections = []
+            has_dangerous = False
+            
+            for detection in latest_detections:
+                if detection.object_name.lower() in dangerous_objects and detection.confidence > 0.5:
+                    has_dangerous = True
+                    dangerous_detections.append({
+                        "name": detection.object_name,
+                        "confidence": detection.confidence,
+                        "timestamp": detection.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                    })
+            
+            response = {
+                "success": True,
+                "has_dangerous_objects": has_dangerous,
+                "total_detections": len(latest_detections),
+                "objects": dangerous_detections,
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            return jsonify(response)
+            
+    except Exception as e:
+        logger.error(f"Error fetching latest detections: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }), 500
+
 def start_worker_threads():
     """Start the worker threads for detection and database operations"""
     global detection_thread, db_thread, stop_event
@@ -1144,9 +1181,6 @@ if __name__ == '__main__':
         # Initialize camera
         initialize_camera()
         
-        # Initialize MQTT
-        setup_mqtt()
-        
         # Start worker threads
         start_worker_threads()
         
@@ -1154,20 +1188,15 @@ if __name__ == '__main__':
         import atexit
         atexit.register(cleanup)
         
-        # Get available port - try a different port
         port = int(os.environ.get('PORT', 3456))
         
-        # Print local URLs for convenience
         print(f"\n\n=====================================================")
         print(f"  Access the application at: http://127.0.0.1:{port}")
         print(f"=====================================================\n")
         
-        # Start Flask application with debug information
         logger.info(f"Starting Flask application on port {port}")
         app.run(host='0.0.0.0', port=port, debug=True, threaded=True, use_reloader=False)
     except Exception as e:
         logger.error(f"Error starting application: {str(e)}")
         logger.error(traceback.format_exc()) 
-
-
 

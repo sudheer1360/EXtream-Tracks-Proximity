@@ -1,202 +1,167 @@
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include <HTTPClient.h>
 #include <ArduinoJson.h>
 
 // WiFi credentials
 const char* ssid = "Act";
 const char* password = "Madhumakeskilled";
 
-// MQTT Broker settings
-const char* mqtt_broker = "broker.hivemq.com";
-const int mqtt_port = 1883;
-const char* mqtt_topic_buzzer = "road_safety/buzzer";
-const char* mqtt_topic_led = "road_safety/led";
-const char* mqtt_client_id = "ESP32Client_"; // Will be appended with random number
+// API endpoint with your actual IP address
+const char* api_url = "http://192.168.99.238:3456/api/latest_detections";
 
 // Pin definitions
 const int BUZZER_PIN = 13;
 const int LED_RED_PIN = 12;
 const int LED_GREEN_PIN = 14;
 
-// Timing variables for reconnection
-unsigned long lastReconnectAttempt = 0;
-const long reconnectInterval = 5000; // 5 seconds between reconnection attempts
+// Timing variables
+unsigned long lastApiCheck = 0;
+const unsigned long API_CHECK_INTERVAL = 500;  // Check every 500ms
+const unsigned long BUZZER_TIMEOUT = 2000;     // 2 seconds max buzzer on time
+unsigned long buzzerStartTime = 0;
+bool buzzerActive = false;
 
-// MQTT client
-WiFiClient espClient;
-PubSubClient client(espClient);
+unsigned long lastWarningTime = 0;
+const unsigned long WARNING_COOLDOWN = 3000;  // 3 seconds cooldown between warnings
+bool isPersonPresent = false;  // Track person detection state
 
-// Generate random client ID
-String getRandomClientId() {
-    String clientId = mqtt_client_id;
-    clientId += String(random(0xffff), HEX);
-    return clientId;
+void setup_wifi() {
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to WiFi");
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nConnected to WiFi");
+        Serial.println("IP address: " + WiFi.localIP().toString());
+    } else {
+        Serial.println("\nFailed to connect to WiFi");
+    }
 }
 
 void setup() {
     Serial.begin(115200);
-    randomSeed(micros()); // Initialize random seed
     
     // Initialize pins
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(LED_RED_PIN, OUTPUT);
     pinMode(LED_GREEN_PIN, OUTPUT);
     
-    // Set initial states
-    digitalWrite(BUZZER_PIN, LOW);
+    // Set initial LED states - Start with everything off
     digitalWrite(LED_RED_PIN, LOW);
-    digitalWrite(LED_GREEN_PIN, HIGH);
+    digitalWrite(LED_GREEN_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
     
     // Connect to WiFi
     setup_wifi();
-    
-    // Configure MQTT
-    client.setServer(mqtt_broker, mqtt_port);
-    client.setCallback(callback);
-    client.setKeepAlive(60); // Keep alive for 60 seconds
-    
-    // Initial connection attempt
-    connectMQTT();
 }
 
-void setup_wifi() {
-    delay(10);
-    Serial.println("Connecting to WiFi...");
-    
-    WiFi.mode(WIFI_STA); // Set WiFi to station mode
-    WiFi.begin(ssid, password);
-    
-    int attempt = 0;
-    while (WiFi.status() != WL_CONNECTED && attempt < 20) {
-        delay(500);
-        Serial.print(".");
-        attempt++;
-    }
-    
+void activateWarning() {
+    digitalWrite(BUZZER_PIN, HIGH);
+    digitalWrite(LED_RED_PIN, HIGH);
+    digitalWrite(LED_GREEN_PIN, LOW);
+    buzzerActive = true;
+    buzzerStartTime = millis();
+    Serial.println("Warning activated!");
+}
+
+void deactivateWarning() {
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(LED_RED_PIN, LOW);
+    digitalWrite(LED_GREEN_PIN, HIGH);
+    buzzerActive = false;
+    Serial.println("Warning deactivated!");
+}
+
+void checkDetections() {
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi connected");
-        Serial.println("IP address: ");
-        Serial.println(WiFi.localIP());
+        HTTPClient http;
+        
+        Serial.println("Making API request...");
+        http.begin(api_url);
+        int httpCode = http.GET();
+        
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            
+            StaticJsonDocument<1024> doc;
+            DeserializationError error = deserializeJson(doc, payload);
+            
+            if (!error) {
+                bool currentPersonDetected = false;
+                
+                if (doc.containsKey("objects")) {
+                    JsonArray objects = doc["objects"];
+                    
+                    for (JsonVariant obj : objects) {
+                        const char* name = obj["name"];
+                        float confidence = obj["confidence"];
+                        
+                        if (strcmp(name, "person") == 0 && confidence > 0.6) {  // Added confidence threshold
+                            Serial.printf("Person detected with confidence: %.2f%%\n", confidence * 100);
+                            currentPersonDetected = true;
+                            break;
+                        }
+                    }
+                }
+                
+                unsigned long currentTime = millis();
+                
+                // State change detection
+                if (currentPersonDetected != isPersonPresent) {
+                    isPersonPresent = currentPersonDetected;
+                    
+                    if (isPersonPresent) {
+                        // Person appeared
+                        if (currentTime - lastWarningTime >= WARNING_COOLDOWN) {
+                            activateWarning();
+                            lastWarningTime = currentTime;
+                            Serial.println("Person appeared - Activating warning");
+                        }
+                    } else {
+                        // Person disappeared
+                        deactivateWarning();
+                        Serial.println("Person disappeared - Deactivating warning");
+                    }
+                }
+            } else {
+                Serial.println("JSON parsing failed!");
+            }
+        } else {
+            Serial.printf("HTTP request failed with error: %d\n", httpCode);
+        }
+        
+        http.end();
     } else {
-        Serial.println("\nWiFi connection failed!");
-        ESP.restart(); // Restart ESP32 if WiFi connection fails
-    }
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-    Serial.println("\n--- MQTT Message Received ---");
-    Serial.print("Topic: ");
-    Serial.println(topic);
-    Serial.print("Payload: ");
-    for (int i = 0; i < length; i++) {
-        Serial.print((char)payload[i]);
-    }
-    Serial.println();
-    
-    StaticJsonDocument<200> doc;
-    char message[length + 1];
-    memcpy(message, payload, length);
-    message[length] = '\0';
-    
-    DeserializationError error = deserializeJson(doc, message);
-    
-    if (error) {
-        Serial.print("Failed to parse JSON: ");
-        Serial.println(error.c_str());
-        return;
-    }
-    
-    // Handle buzzer control
-    if (strcmp(topic, mqtt_topic_buzzer) == 0) {
-        bool state = doc["state"];
-        Serial.print("Setting buzzer state to: ");
-        Serial.println(state ? "ON" : "OFF");
-        
-        digitalWrite(BUZZER_PIN, state ? HIGH : LOW);
-        if (state) {
-            tone(BUZZER_PIN, 2000); // 2000Hz frequency
-        } else {
-            noTone(BUZZER_PIN);
-        }
-        
-        Serial.println("Buzzer state changed");
-    }
-}
-
-boolean connectMQTT() {
-    if (!client.connected()) {
-        Serial.println("Attempting MQTT connection...");
-        
-        String clientId = getRandomClientId();
-        
-        if (client.connect(clientId.c_str())) {
-            Serial.println("Connected to MQTT broker");
-            
-            // Subscribe to topics
-            client.subscribe(mqtt_topic_buzzer);
-            client.subscribe(mqtt_topic_led);
-            
-            // Publish connection message
-            String connectMsg = "ESP32 " + clientId + " connected";
-            client.publish("road_safety/status", connectMsg.c_str());
-            
-            return true;
-        } else {
-            Serial.print("Failed, rc=");
-            Serial.print(client.state());
-            Serial.println(" Retrying later...");
-            return false;
-        }
-    }
-    return true;
-}
-
-void checkWiFiConnection() {
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi connection lost! Reconnecting...");
-        WiFi.disconnect();
-        WiFi.begin(ssid, password);
-        
-        int attempt = 0;
-        while (WiFi.status() != WL_CONNECTED && attempt < 20) {
-            delay(500);
-            Serial.print(".");
-            attempt++;
-        }
-        
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("\nWiFi reconnection failed! Restarting...");
-            ESP.restart();
-        }
+        Serial.println("WiFi disconnected. Attempting to reconnect...");
+        setup_wifi();
     }
 }
 
 void loop() {
-    static unsigned long lastHeartbeat = 0;
-    const unsigned long HEARTBEAT_INTERVAL = 5000; // 5 seconds
+    unsigned long currentMillis = millis();
     
-    // Check WiFi connection
-    checkWiFiConnection();
-    
-    // Handle MQTT connection
-    if (!client.connected()) {
-        unsigned long now = millis();
-        if (now - lastReconnectAttempt > reconnectInterval) {
-            lastReconnectAttempt = now;
-            if (connectMQTT()) {
-                lastReconnectAttempt = 0;
-            }
-        }
-    } else {
-        client.loop();
-        
-        // Send heartbeat message every 5 seconds
-        unsigned long now = millis();
-        if (now - lastHeartbeat > HEARTBEAT_INTERVAL) {
-            lastHeartbeat = now;
-            client.publish("road_safety/heartbeat", "ESP32 alive");
-            Serial.println("Heartbeat sent");
-        }
+    // Check API periodically
+    if (currentMillis - lastApiCheck >= API_CHECK_INTERVAL) {
+        lastApiCheck = currentMillis;
+        checkDetections();
     }
+    
+    // Handle buzzer timeout only if warning is active
+    if (buzzerActive && (currentMillis - buzzerStartTime >= BUZZER_TIMEOUT)) {
+        digitalWrite(BUZZER_PIN, LOW);  // Turn off only the buzzer
+        buzzerActive = false;
+        Serial.println("Buzzer timeout - Buzzer turned off but keeping LED state");
+    }
+    
+    delay(100);  // Reduced delay to be more responsive
 }
+
+
+
 
